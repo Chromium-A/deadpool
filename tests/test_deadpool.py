@@ -499,8 +499,21 @@ def test_kill(sig):
         exe.submit(k, 1)
         exe.submit(k, 1)
 
-        with pytest.raises(deadpool.ProcessError):
+        # The killed worker should cause the future to raise a ProcessError.
+        # Capture the exception and assert the message includes the
+        # exitcode or the signal name for clarity.
+        with pytest.raises(deadpool.ProcessError) as excinfo:
             f1.result()
+
+            msg = str(excinfo.value)
+            # Check for the human-readable signal name, but also
+            # allow matching the numeric exitcode (negative for signals).
+            expected_signame = signal.strsignal(sig)
+            print(msg)
+            assert (
+                (expected_signame and expected_signame in msg)
+                and f"exitcode -{int(sig)}" in msg
+            )
 
         assert f2.result() == 1
 

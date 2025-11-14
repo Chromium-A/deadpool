@@ -28,6 +28,7 @@ import pickle
 import signal
 import sys
 import threading
+import time
 import traceback
 import typing
 import weakref
@@ -552,9 +553,40 @@ class Deadpool(Executor):
                         results = worker.get_results()
                     except EOFError:
                         self._statistics.tasks_failed.increment()
-                        fut.set_exception(
-                            ProcessError("Worker process died unexpectedly")
-                        )
+                        # Try to obtain an exitcode / signal name to give a
+                        # more informative error to the caller. Sometimes
+                        # the exitcode is not immediately available, so wait
+                        # a short while for it to be set by the OS.
+                        exitcode = getattr(worker.process, "exitcode", None)
+                        if exitcode is None:
+                            for _ in range(10):
+                                exitcode = getattr(worker.process, "exitcode", None)
+                                if exitcode is not None:
+                                    break
+                                time.sleep(0.01)
+
+                        try:
+                            if exitcode is None:
+                                signame = None
+                            else:
+                                signame = (
+                                    signal.strsignal(-exitcode)
+                                    if exitcode < 0
+                                    else None
+                                )
+                        except (ValueError, TypeError):
+                            signame = None
+
+                        if signame:
+                            msg = (
+                                f"Worker process {worker.pid} died (exitcode {exitcode} ({signame}))"
+                            )
+                        elif exitcode is not None:
+                            msg = f"Worker process {worker.pid} died (exitcode {exitcode})"
+                        else:
+                            msg = "Worker process died unexpectedly"
+
+                        fut.set_exception(ProcessError(msg))
                     except BaseException as e:
                         self._statistics.tasks_failed.increment()
                         logger.debug(f"Unexpected exception from worker: {e}")
@@ -577,10 +609,14 @@ class Deadpool(Executor):
                 elif not worker.is_alive():
                     self._statistics.tasks_failed.increment()
                     logger.debug(f"p is no longer alive: {worker.process}")
-                    try:
-                        signame = signal.strsignal(-worker.process.exitcode)
-                    except (ValueError, TypeError):  # pragma: no cover
+                    exitcode = getattr(worker.process, "exitcode", None)
+                    if exitcode is None:
                         signame = "Unknown"
+                    else:
+                        try:
+                            signame = signal.strsignal(-exitcode)
+                        except (ValueError, TypeError):  # pragma: no cover
+                            signame = "Unknown"
 
                     if not fut.done():
                         # It is possible that fut has already had a result set on
